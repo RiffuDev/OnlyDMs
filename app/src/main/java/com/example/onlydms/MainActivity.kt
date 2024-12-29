@@ -1,23 +1,36 @@
 package com.example.onlydms
 
 import android.annotation.SuppressLint
+import android.content.Intent
+import android.content.UriPermission
+import android.net.Uri
 import android.os.Bundle
+import android.os.Environment
+import android.os.Parcelable
+import android.provider.MediaStore
 import android.util.Log
 import android.view.View
 import android.webkit.*
 import androidx.activity.viewModels
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.FileProvider
 import androidx.lifecycle.lifecycleScope
 import com.google.android.material.snackbar.Snackbar
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import com.example.onlydms.utils.Logger
+import java.io.File
+import java.io.IOException
+import java.text.SimpleDateFormat
+import java.util.*
 
 class MainActivity : AppCompatActivity() {
     private val viewModel: MainViewModel by viewModels()
     private lateinit var webView: WebView
     private lateinit var backButtonOverlay: View
     private var snackbar: Snackbar? = null
+    private var filePathCallback: ValueCallback<Array<Uri>>? = null
+    private var cameraPhotoPath: String? = null
 
     companion object {
         private const val TAG = "MainActivity"
@@ -25,6 +38,7 @@ class MainActivity : AppCompatActivity() {
         private const val INSTAGRAM_DIRECT_URL = "https://www.instagram.com/direct/inbox/"
         private const val INSTAGRAM_BASE_URL = "https://www.instagram.com/"
         private const val INSTAGRAM_DIRECT_THREAD_PATTERN = """https://www\.instagram\.com/direct/t/\d+.*"""
+        private const val INPUT_FILE_REQUEST_CODE = 1
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -53,6 +67,9 @@ class MainActivity : AppCompatActivity() {
             setSupportZoom(true)
             builtInZoomControls = true
             displayZoomControls = false
+            allowFileAccess = true
+            allowContentAccess = true
+            mediaPlaybackRequiresUserGesture = false
         }
 
         CookieManager.getInstance().apply {
@@ -130,6 +147,67 @@ class MainActivity : AppCompatActivity() {
                 super.onReceivedError(view, request, error)
                 Logger.e(TAG, "WebView error: ${error?.description}")
                 showError("Failed to load page")
+            }
+        }
+
+        webView.webChromeClient = object : WebChromeClient() {
+            override fun onShowFileChooser(
+                webView: WebView?,
+                filePathCallback: ValueCallback<Array<Uri>>?,
+                fileChooserParams: FileChooserParams?
+            ): Boolean {
+                this@MainActivity.filePathCallback?.onReceiveValue(null)
+                this@MainActivity.filePathCallback = filePathCallback
+
+                try {
+                    // Create camera intent
+                    val takePictureIntent = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
+                    var photoFile: File? = null
+
+                    try {
+                        photoFile = createImageFile()
+                    } catch (ex: IOException) {
+                        Logger.e(TAG, "Error creating image file", ex)
+                    }
+
+                    // Continue only if the File was successfully created
+                    if (photoFile != null) {
+                        cameraPhotoPath = "file:" + photoFile.absolutePath
+                        val photoURI = FileProvider.getUriForFile(
+                            this@MainActivity,
+                            "${applicationContext.packageName}.fileprovider",
+                            photoFile
+                        )
+                        takePictureIntent.putExtra(MediaStore.EXTRA_OUTPUT, photoURI)
+                    } else {
+                        takePictureIntent.putExtra(MediaStore.EXTRA_OUTPUT, null as Uri?)
+                    }
+
+                    // Create gallery intent
+                    val contentSelectionIntent = Intent(Intent.ACTION_GET_CONTENT).apply {
+                        addCategory(Intent.CATEGORY_OPENABLE)
+                        type = "image/*"
+                    }
+
+                    // Create chooser intent
+                    val chooserIntent = Intent(Intent.ACTION_CHOOSER).apply {
+                        putExtra(Intent.EXTRA_INTENT, contentSelectionIntent)
+                        putExtra(Intent.EXTRA_TITLE, "Select Image Source")
+                        
+                        // Only add camera intent if we successfully created the file
+                        if (photoFile != null) {
+                            putExtra(Intent.EXTRA_INITIAL_INTENTS, arrayOf<Parcelable>(takePictureIntent))
+                        }
+                    }
+
+                    startActivityForResult(chooserIntent, INPUT_FILE_REQUEST_CODE)
+                    return true
+                } catch (e: Exception) {
+                    Logger.e(TAG, "File chooser error", e)
+                    filePathCallback?.onReceiveValue(null)
+                    this@MainActivity.filePathCallback = null
+                    return false
+                }
             }
         }
 
@@ -247,6 +325,38 @@ class MainActivity : AppCompatActivity() {
         }
         
         return url in mainInboxUrls || url.endsWith("/direct/inbox/") || url.endsWith("/direct/inbox")
+    }
+
+    private fun createImageFile(): File {
+        // Create an image file name
+        val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
+        val imageFileName = "JPEG_${timeStamp}_"
+        val storageDir = getExternalFilesDir(Environment.DIRECTORY_PICTURES)
+        return File.createTempFile(
+            imageFileName,  /* prefix */
+            ".jpg",        /* suffix */
+            storageDir     /* directory */
+        ).apply {
+            // Save a file: path for use with ACTION_VIEW intents
+            cameraPhotoPath = absolutePath
+        }
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        if (requestCode == INPUT_FILE_REQUEST_CODE) {
+            filePathCallback?.let { callback ->
+                val results = when {
+                    resultCode != RESULT_OK -> null
+                    data?.data != null -> arrayOf(data.data!!)
+                    cameraPhotoPath != null -> arrayOf(Uri.parse("file://$cameraPhotoPath"))
+                    else -> null
+                }
+                callback.onReceiveValue(results)
+                filePathCallback = null
+            }
+        } else {
+            super.onActivityResult(requestCode, resultCode, data)
+        }
     }
 
     override fun onBackPressed() {
